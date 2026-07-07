@@ -1,0 +1,33 @@
+# Virtual muhit
+.venv/
+venv/
+
+# Python keshi
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Test / lint keshlari
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Model fayllari — og'ir, alohida yuklab olinadi (README ga qarang)
+models/
+
+# Env — faqat .env.example commit qilinadi
+.env
+.env.local
+
+# Build
+build/
+dist/
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db

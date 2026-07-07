@@ -1,0 +1,13 @@
+# FaceID face-service — runtime dependencies (Python 3.11)
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+pydantic==2.11.4
+pydantic-settings==2.9.1
+structlog==25.3.0
+numpy==1.26.4
+opencv-python-headless==4.11.0.86
+insightface==0.7.3
+# GPU uchun: onnxruntime o'rniga onnxruntime-gpu==1.21.1 o'rnating va FACE_USE_GPU=true qiling
+onnxruntime==1.21.1
+asyncpg==0.30.0
+python-multipart==0.0.20

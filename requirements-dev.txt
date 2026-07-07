@@ -1,0 +1,13 @@
+# Yengil test muhiti — og'ir ML stack (insightface/onnxruntime/asyncpg) SHART EMAS.
+# Testlar modellarni yuklamaydi: og'ir importlar faqat lifespan ichida bo'ladi.
+#   python -m venv .venv && .venv/Scripts/pip install -r requirements-dev.txt
+#   pytest
+fastapi==0.115.12
+pydantic==2.11.4
+pydantic-settings==2.9.1
+structlog==25.3.0
+numpy==1.26.4
+opencv-python-headless==4.11.0.86
+python-multipart==0.0.20
+httpx==0.28.1
+pytest==8.3.5
