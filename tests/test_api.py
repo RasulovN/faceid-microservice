@@ -170,7 +170,10 @@ class TestVerify:
         assert body["match"] is False
         assert body["similarity"] < 0.5
 
-    def test_liveness_below_threshold(self, client, auth_headers, image_b64) -> None:
+    def test_liveness_below_threshold_blocks_match(
+        self, client, auth_headers, image_b64
+    ) -> None:
+        """XAVFSIZLIK: embedding mos bo'lsa ham liveness o'tmasa match=false."""
         embedding = make_embedding(seed=42)
         app.state.face_engine = FakeFaceEngine(embedding=embedding)
         app.state.liveness_engine = FakeLivenessEngine(score=0.3)
@@ -181,7 +184,9 @@ class TestVerify:
         )
         body = response.json()
         assert body["liveness_passed"] is False
-        assert body["match"] is True  # matching is reported independently
+        assert body["match"] is False
+        assert body["error"] == "LIVENESS_FAILED"
+        assert body["similarity"] > 0.99  # o'xshashlik hisobot uchun saqlanadi
 
     def test_check_liveness_false_skips_check(self, client, auth_headers, image_b64) -> None:
         embedding = make_embedding(seed=42)
@@ -290,6 +295,155 @@ class TestIdentify:
         assert response.status_code == 503
         assert response.json()["detail"]["code"] == "DB_UNAVAILABLE"
 
+    def test_liveness_failed_hides_employee(self, client, auth_headers, image_b64) -> None:
+        """XAVFSIZLIK: spoof aniqlanganda xodim ID'si ham oshkor bo'lmaydi."""
+        app.state.face_engine = FakeFaceEngine()
+        app.state.liveness_engine = FakeLivenessEngine(score=0.2)
+        app.state.db_pool = FakePool(
+            rows=[{"employee_id": EMPLOYEE_ID, "similarity": 0.85}]
+        )
+        response = client.post(
+            "/identify", json=self._payload(image_b64), headers=auth_headers
+        )
+        body = response.json()
+        assert body["found"] is False
+        assert body["employee_id"] is None
+        assert body["error"] == "LIVENESS_FAILED"
+
+
+def _real_png_bytes() -> bytes:
+    """cv2 bilan dekodlanadigan haqiqiy PNG (frame'lar real decode qilinadi)."""
+    import cv2
+    import numpy as _np
+
+    img = _np.zeros((32, 32, 3), dtype=_np.uint8)
+    img[8:24, 8:24] = (10, 120, 240)
+    ok, encoded = cv2.imencode(".png", img)
+    assert ok
+    return encoded.tobytes()
+
+
+class TestVerifyLive:
+    """POST /verify-live — burst verifikatsiya oqimi (fakes bilan)."""
+
+    def _post(self, client, auth_headers, embedding, frames=4, challenge="turn"):
+        png = _real_png_bytes()
+        files = [
+            ("frames", (f"frame{i}.png", png, "image/png")) for i in range(frames)
+        ]
+        import json as _json
+
+        return client.post(
+            "/verify-live",
+            files=files,
+            data={"embeddings": _json.dumps([embedding]), "challenge": challenge},
+            headers=auth_headers,
+        )
+
+    def test_head_turn_pass(self, client, auth_headers) -> None:
+        embedding = make_embedding(seed=7)
+        app.state.face_engine = FakeFaceEngine(
+            embedding=embedding, yaws=[-9.0, -2.0, 5.0, 8.0]
+        )
+        app.state.liveness_engine = FakeLivenessEngine(score=0.9)
+        response = self._post(client, auth_headers, embedding)
+        assert response.status_code == 200
+        body = response.json()
+        assert body["match"] is True
+        assert body["challenge_passed"] is True
+        assert body["liveness_passed"] is True
+        assert body["frames_valid"] == 4
+        assert body["error"] is None
+
+    def test_static_photo_fails_challenge(self, client, auth_headers) -> None:
+        """Statik rasm: yaw o'zgarmaydi, blink yo'q → CHALLENGE_FAILED."""
+        embedding = make_embedding(seed=7)
+        app.state.face_engine = FakeFaceEngine(
+            embedding=embedding, yaws=[1.0, 1.2, 0.8, 1.1]
+        )
+        app.state.liveness_engine = FakeLivenessEngine(score=0.9)
+        response = self._post(client, auth_headers, embedding)
+        body = response.json()
+        assert body["match"] is False
+        assert body["error"] == "CHALLENGE_FAILED"
+
+    def test_blink_passes_challenge_without_turn(self, client, auth_headers) -> None:
+        embedding = make_embedding(seed=7)
+        app.state.face_engine = FakeFaceEngine(
+            embedding=embedding,
+            yaws=[1.0, 1.0, 1.0, 1.0],
+            ears=[0.30, 0.12, 0.28, 0.29],  # bitta kadr yopiq ko'z (blink)
+        )
+        app.state.liveness_engine = FakeLivenessEngine(score=0.9)
+        response = self._post(client, auth_headers, embedding)
+        body = response.json()
+        assert body["match"] is True
+        assert body["challenge_passed"] is True
+
+    def test_spoof_photo_fails_liveness(self, client, auth_headers) -> None:
+        embedding = make_embedding(seed=7)
+        app.state.face_engine = FakeFaceEngine(
+            embedding=embedding, yaws=[-9.0, -2.0, 5.0, 8.0]
+        )
+        app.state.liveness_engine = FakeLivenessEngine(score=0.2)
+        response = self._post(client, auth_headers, embedding)
+        body = response.json()
+        assert body["match"] is False
+        assert body["error"] == "LIVENESS_FAILED"
+        assert body["liveness_passed"] is False
+
+    def test_wrong_person_not_recognized(self, client, auth_headers) -> None:
+        app.state.face_engine = FakeFaceEngine(
+            embedding=make_embedding(seed=1), yaws=[-9.0, -2.0, 5.0, 8.0]
+        )
+        app.state.liveness_engine = FakeLivenessEngine(score=0.9)
+        response = self._post(client, auth_headers, make_embedding(seed=2))
+        body = response.json()
+        assert body["match"] is False
+        assert body["error"] == "FACE_NOT_RECOGNIZED"
+
+    def test_no_face_in_frames(self, client, auth_headers) -> None:
+        app.state.face_engine = FakeFaceEngine(face_found=False)
+        app.state.liveness_engine = FakeLivenessEngine(score=0.9)
+        response = self._post(client, auth_headers, make_embedding())
+        body = response.json()
+        assert body["match"] is False
+        assert body["frames_valid"] == 0
+        assert body["error"] == "FACE_NOT_FOUND"
+
+    def test_challenge_none_skips_challenge(self, client, auth_headers) -> None:
+        embedding = make_embedding(seed=7)
+        app.state.face_engine = FakeFaceEngine(embedding=embedding)
+        app.state.liveness_engine = FakeLivenessEngine(score=0.9)
+        response = self._post(client, auth_headers, embedding, challenge="none")
+        body = response.json()
+        assert body["match"] is True
+        assert body["challenge_passed"] is True
+
+    def test_invalid_embeddings_json_is_422(self, client, auth_headers) -> None:
+        app.state.face_engine = FakeFaceEngine()
+        files = [("frames", ("f.png", _real_png_bytes(), "image/png"))] * 3
+        response = client.post(
+            "/verify-live",
+            files=files,
+            data={"embeddings": "not-json"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 422
+
+    def test_single_frame_is_422(self, client, auth_headers) -> None:
+        app.state.face_engine = FakeFaceEngine()
+        response = self._post(client, auth_headers, make_embedding(), frames=1)
+        assert response.status_code == 422
+
+    def test_requires_api_key(self, client) -> None:
+        response = client.post(
+            "/verify-live",
+            files=[("frames", ("f.png", b"x", "image/png"))] * 3,
+            data={"embeddings": "[]"},
+        )
+        assert response.status_code == 401
+
 
 class TestLivenessEndpoint:
     def test_pass(self, client, auth_headers, image_b64) -> None:
@@ -321,6 +475,66 @@ class TestLivenessEndpoint:
         body = response.json()
         assert body["passed"] is False
         assert body["error"] == "FACE_NOT_FOUND"
+
+
+class TestAnalyze:
+    """POST /analyze — real-time kadr tahlili (WS oqimi uchun)."""
+
+    def test_face_found_with_normalized_bbox(self, client, auth_headers, image_b64) -> None:
+        app.state.face_engine = FakeFaceEngine(yaws=[5.0], ears=[0.3])
+        app.state.liveness_engine = FakeLivenessEngine(score=0.88)
+        response = client.post(
+            "/analyze", json={"image_b64": image_b64}, headers=auth_headers
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["found"] is True
+        assert body["multiple"] is False
+        # Fixture rasmi 32x32; fake bbox [10,10,120,130] → normalizatsiya
+        assert body["frame_width"] == 32
+        assert body["frame_height"] == 32
+        assert 0.0 <= body["x"] <= 1.0
+        assert body["width"] > 0
+        assert body["yaw"] == 5.0
+        assert body["ear"] == 0.3
+        # Sifat metrikalari va har-kadr passiv anti-spoof skori
+        assert body["brightness"] is not None
+        assert body["sharpness"] is not None
+        assert body["liveness_score"] == 0.88
+        assert body["landmarks"] is None  # fake engine landmark bermaydi
+
+    def test_check_liveness_false_skips_score(self, client, auth_headers, image_b64) -> None:
+        app.state.face_engine = FakeFaceEngine()
+        app.state.liveness_engine = FakeLivenessEngine(score=0.9)
+        response = client.post(
+            "/analyze",
+            json={"image_b64": image_b64, "check_liveness": False},
+            headers=auth_headers,
+        )
+        assert response.json()["liveness_score"] is None
+
+    def test_no_face(self, client, auth_headers, image_b64) -> None:
+        app.state.face_engine = FakeFaceEngine(face_found=False)
+        response = client.post(
+            "/analyze", json={"image_b64": image_b64}, headers=auth_headers
+        )
+        body = response.json()
+        assert body["found"] is False
+        assert body["error"] is None
+        assert body["frame_width"] == 32
+
+    def test_invalid_image(self, client, auth_headers) -> None:
+        app.state.face_engine = FakeFaceEngine()
+        response = client.post(
+            "/analyze", json={"image_b64": "%%%"}, headers=auth_headers
+        )
+        body = response.json()
+        assert body["found"] is False
+        assert body["error"] == "INVALID_IMAGE"
+
+    def test_requires_api_key(self, client, image_b64) -> None:
+        response = client.post("/analyze", json={"image_b64": image_b64})
+        assert response.status_code == 401
 
 
 class TestHealth:

@@ -1,13 +1,18 @@
-"""Passive anti-spoofing (liveness) via MiniFASNetV2 ONNX.
+"""Passive anti-spoofing (liveness) via a MiniFASNet ONNX ensemble.
 
-Primary path: the Silent-Face-Anti-Spoofing MiniFASNetV2 model (ready-made ONNX
-conversion, see ``DEFAULT_LIVENESS_MODEL_URL`` in :mod:`app.config`) is
-downloaded on first start and served with onnxruntime.
+Primary path: two Silent-Face-Anti-Spoofing conversions (binary live/spoof +
+print/replay-specialised, see ``DEFAULT_LIVENESS_MODEL_URL`` /
+``DEFAULT_LIVENESS_MODEL2_URL`` in :mod:`app.config`) are downloaded on first
+start and served with onnxruntime. :class:`LivenessEnsemble` aggregates the
+per-model live probabilities (``min`` by default — a face is only "live" if
+EVERY model agrees), which is substantially stronger against screen-replay
+photos than the single binary model.
 
-Fallback: if the model cannot be downloaded/loaded, the engine switches to
-``disabled`` mode — a WARNING is logged at startup, every request gets
-``liveness_score=1.0, passed=True`` and ``GET /health`` reports
-``liveness: "disabled"``. There is no heuristic pseudo-liveness.
+Fallback: a model that cannot be downloaded/loaded is skipped; if NO model
+loads the ensemble switches to ``disabled`` mode — a WARNING is logged at
+startup, every request gets ``liveness_score=1.0, passed=True`` and
+``GET /health`` reports ``liveness: "disabled"``. There is no heuristic
+pseudo-liveness.
 """
 
 from __future__ import annotations
@@ -25,7 +30,11 @@ from app.logging import get_logger
 logger = get_logger(__name__)
 
 STATUS_OK = "ok"
+STATUS_PARTIAL = "partial"
 STATUS_DISABLED = "disabled"
+
+AGGREGATION_MIN = "min"
+AGGREGATION_MEAN = "mean"
 
 
 def softmax(logits: np.ndarray) -> np.ndarray:
@@ -175,3 +184,56 @@ class LivenessEngine:
         except Exception as exc:  # noqa: BLE001 — fail closed on spoof-check errors
             logger.error("liveness_inference_failed", error=str(exc))
             return 0.0
+
+
+class LivenessEnsemble:
+    """Aggregates several :class:`LivenessEngine` models into one score.
+
+    Duck-type compatible with a single engine (``available`` / ``status`` /
+    ``score``), so callers do not care whether one or many models back it.
+
+    Aggregation: ``min`` (default) — every model must consider the face live,
+    the strongest anti-spoof posture; ``mean`` — softer, fewer false rejects.
+    """
+
+    def __init__(self, models: list[LivenessEngine], aggregation: str = AGGREGATION_MIN) -> None:
+        self.models = models
+        self.aggregation = aggregation if aggregation in (AGGREGATION_MIN, AGGREGATION_MEAN) else AGGREGATION_MIN
+
+    @property
+    def _loaded(self) -> list[LivenessEngine]:
+        return [m for m in self.models if m.available]
+
+    @property
+    def available(self) -> bool:
+        return len(self._loaded) > 0
+
+    @property
+    def status(self) -> str:
+        loaded = len(self._loaded)
+        if loaded == 0:
+            return STATUS_DISABLED
+        if loaded < len(self.models):
+            return STATUS_PARTIAL
+        return STATUS_OK
+
+    def load(self) -> None:
+        """Load every member model (each degrades gracefully on failure)."""
+        for model in self.models:
+            model.load()
+        logger.info(
+            "liveness_ensemble_ready",
+            models_total=len(self.models),
+            models_loaded=len(self._loaded),
+            aggregation=self.aggregation,
+        )
+
+    def score(self, img_bgr: np.ndarray, bbox: np.ndarray) -> float:
+        """Aggregated live probability; 1.0 when no model is loaded (disabled)."""
+        loaded = self._loaded
+        if not loaded:
+            return 1.0
+        scores = [model.score(img_bgr, bbox) for model in loaded]
+        if self.aggregation == AGGREGATION_MEAN:
+            return float(np.mean(scores))
+        return float(min(scores))

@@ -63,6 +63,74 @@ class IdentifyResponse(BaseModel):
     error: str | None = None
 
 
+class VerifyLiveResponse(BaseModel):
+    """Multi-frame (burst) verification: identity + passive liveness + challenge."""
+
+    #: YAKUNIY qaror: identity mos VA liveness o'tdi VA challenge bajarildi.
+    match: bool
+    similarity: float = 0.0
+    liveness_score: float = 0.0
+    liveness_passed: bool = False
+    challenge_passed: bool = False
+    #: Kadrlararo minimal juftlik o'xshashligi (bir odam ekanligi dalili).
+    consistency: float = 0.0
+    frames_total: int = 0
+    frames_valid: int = 0
+    #: FACE_NOT_FOUND | LIVENESS_FAILED | CHALLENGE_FAILED | FACE_NOT_RECOGNIZED | None
+    error: str | None = None
+    #: Diagnostika (masalan IDENTITY_INCONSISTENT, NO_HEAD_TURN) — log/audit uchun.
+    reasons: list[str] = Field(default_factory=list)
+
+
+class AnalyzeRequest(BaseModel):
+    """Bitta kadr uchun real-time pipeline tahlili (WS oqimi)."""
+
+    image_b64: str = Field(min_length=1)
+    #: Har kadrda passiv anti-spoof skorini ham hisoblash (ansambl, ~30ms).
+    check_liveness: bool = True
+    #: Kadrga qo'llanadigan rotatsiya (soat mili bo'yicha, gradus).
+    #: Mobil `skipProcessing` bilan tez suratga oladi — sensor orientatsiyasi
+    #: tuzatilmagan bo'ladi; server shu parametr bilan to'g'irlaydi.
+    rotation: int = Field(default=0)
+    #: True — 0° da yuz topilmasa 270/90/180 ni sinab ko'radi (sessiya boshida
+    #: BIR MARTA kalibrlash; topilgan qiymat `rotation_applied` da qaytadi).
+    try_rotations: bool = False
+
+
+class AnalyzeResponse(BaseModel):
+    """Kadr tahlili: detect → pose → landmarklar → sifat → passiv anti-spoof.
+
+    bbox va landmark koordinatalari kadr o'lchamiga nisbatan 0..1 oralig'ida —
+    klient ularni ekran o'lchamiga o'zi moslaydi (cover-fit). Embedding
+    QAYTMAYDI — identifikatsiya faqat yakuniy /verify-live bosqichida.
+    """
+
+    found: bool
+    multiple: bool = False
+    x: float = 0.0
+    y: float = 0.0
+    width: float = 0.0
+    height: float = 0.0
+    yaw: float | None = None
+    pitch: float | None = None
+    roll: float | None = None
+    ear: float | None = None
+    det_score: float = 0.0
+    #: Yuz hududining o'rtacha yorqinligi (0..255) — "juda qorong'i" gate.
+    brightness: float | None = None
+    #: Laplacian dispersiyasi (keskinlik) — xira kadrlarni rad etish uchun.
+    sharpness: float | None = None
+    #: Passiv anti-spoof ansambl skori (0..1); liveness o'chiq bo'lsa None.
+    liveness_score: float | None = None
+    #: 106 ta 2D landmark, normalized [[x,y]...] — real-time mesh rendering.
+    landmarks: list[list[float]] | None = None
+    #: Kadrga amalda qo'llangan rotatsiya (kalibrlash natijasi).
+    rotation_applied: int = 0
+    frame_width: int = 0
+    frame_height: int = 0
+    error: str | None = None
+
+
 class LivenessRequest(BaseModel):
     image_b64: str = Field(min_length=1)
 

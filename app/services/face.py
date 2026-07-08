@@ -36,6 +36,63 @@ ERROR_FACE_NOT_FOUND = "FACE_NOT_FOUND"
 ERROR_FACE_MULTIPLE = "FACE_MULTIPLE"
 ERROR_FACE_LOW_QUALITY = "FACE_LOW_QUALITY"
 
+#: iBUG-68 landmark layout: right eye = 36..41, left eye = 42..47.
+_EYE_RIGHT_68 = (36, 37, 38, 39, 40, 41)
+_EYE_LEFT_68 = (42, 43, 44, 45, 46, 47)
+
+
+def estimate_yaw_from_kps(kps: np.ndarray) -> float | None:
+    """Rough yaw (deg) from the 5-point kps when the 3D pose model is absent.
+
+    kps rows: [left_eye, right_eye, nose, mouth_left, mouth_right]. The nose x
+    offset from the eye midpoint, normalised by the inter-eye distance, maps
+    approximately linearly to yaw (offset of half the eye distance ~ 30 deg).
+    """
+    if kps is None or len(kps) < 3:
+        return None
+    pts = np.asarray(kps, dtype=np.float64)
+    eye_dx = float(pts[1][0] - pts[0][0])
+    if abs(eye_dx) < 1e-6:
+        return None
+    mid_x = (float(pts[0][0]) + float(pts[1][0])) / 2.0
+    return float((float(pts[2][0]) - mid_x) / eye_dx * 60.0)
+
+
+def _single_eye_aspect_ratio(pts: np.ndarray, idx: tuple[int, ...]) -> float | None:
+    """EAR = (|p2-p6| + |p3-p5|) / (2*|p1-p4|) for one eye (iBUG indices)."""
+    eye = pts[list(idx)]
+    horizontal = float(np.linalg.norm(eye[0] - eye[3]))
+    if horizontal < 1e-6:
+        return None
+    v1 = float(np.linalg.norm(eye[1] - eye[5]))
+    v2 = float(np.linalg.norm(eye[2] - eye[4]))
+    return (v1 + v2) / (2.0 * horizontal)
+
+
+def eye_aspect_ratio_68(landmarks: np.ndarray | None) -> float | None:
+    """Mean eye-aspect-ratio from 68-point landmarks (x,y). None if unavailable.
+
+    Open eyes give ~0.25..0.35; a blink dips below ~0.18. Used as an optional
+    liveness bonus in the burst analysis (a printed photo never blinks).
+    """
+    if landmarks is None:
+        return None
+    pts = np.asarray(landmarks, dtype=np.float64)
+    if pts.ndim != 2 or pts.shape[0] < 48:
+        return None
+    pts = pts[:, :2]
+    values = [
+        v
+        for v in (
+            _single_eye_aspect_ratio(pts, _EYE_RIGHT_68),
+            _single_eye_aspect_ratio(pts, _EYE_LEFT_68),
+        )
+        if v is not None
+    ]
+    if not values:
+        return None
+    return float(np.mean(values))
+
 
 def decode_image_bytes(data: bytes) -> np.ndarray | None:
     """Decode raw image bytes (jpeg/png/webp/...) into a BGR ndarray."""
@@ -102,7 +159,18 @@ class DetectedFace:
 
     bbox: np.ndarray  # [x1, y1, x2, y2], float32
     det_score: float
-    embedding: np.ndarray  # 512-dim, L2-normalized (ArcFace)
+    #: 512-dim, L2-normalized (ArcFace). Stream (det-lite) enginda None —
+    #: recognition moduli oqimda yuklanmaydi, faqat yakuniy verify'da ishlaydi.
+    embedding: np.ndarray | None
+    #: Head yaw in degrees (from the 3D pose model, kps fallback) — burst challenge.
+    yaw: float | None = None
+    #: Eye aspect ratio (68-point landmarks) — blink evidence in bursts.
+    ear: float | None = None
+    #: Head pitch/roll in degrees (3D pose model) — pose-quality gating.
+    pitch: float | None = None
+    roll: float | None = None
+    #: 106-point 2D landmarks (absolute px) — real-time face mesh rendering.
+    landmarks: np.ndarray | None = None
 
     @property
     def width(self) -> float:
@@ -128,7 +196,12 @@ class EnrollResult:
 
 
 class FaceEngine:
-    """Thin wrapper around ``insightface.app.FaceAnalysis`` (buffalo_l pack)."""
+    """Thin wrapper around ``insightface.app.FaceAnalysis`` (buffalo_l pack).
+
+    ``allowed_modules`` bilan yengil (stream) variant yaratish mumkin: masalan
+    ``["detection", "landmark_2d_106", "landmark_3d_68"]`` — og'ir ArcFace
+    recognition har kadrda ishlamaydi (real-time /analyze uchun).
+    """
 
     def __init__(
         self,
@@ -136,11 +209,13 @@ class FaceEngine:
         model_root: str = "~/.insightface",
         det_size: int = 640,
         use_gpu: bool = False,
+        allowed_modules: list[str] | None = None,
     ) -> None:
         self.model_name = model_name
         self.model_root = model_root
         self.det_size = det_size
         self.use_gpu = use_gpu
+        self.allowed_modules = allowed_modules
         self._app: Any = None
 
     @property
@@ -148,7 +223,7 @@ class FaceEngine:
         return self._app is not None
 
     def load(self) -> None:
-        """Load RetinaFace + ArcFace models. Heavy — call once at startup."""
+        """Load RetinaFace (+ tanlangan modullar). Heavy — call once at startup."""
         from insightface.app import FaceAnalysis  # deferred heavy import
 
         providers = (
@@ -160,6 +235,7 @@ class FaceEngine:
             name=self.model_name,
             root=self.model_root,
             providers=providers,
+            allowed_modules=self.allowed_modules,
         )
         analyzer.prepare(
             ctx_id=0 if self.use_gpu else -1,
@@ -171,6 +247,7 @@ class FaceEngine:
             model=self.model_name,
             det_size=self.det_size,
             providers=providers,
+            modules=self.allowed_modules or "all",
         )
 
     def detect(self, img_bgr: np.ndarray) -> list[DetectedFace]:
@@ -178,16 +255,56 @@ class FaceEngine:
         if self._app is None:
             raise RuntimeError("Face model is not loaded; call FaceEngine.load() first")
         faces = self._app.get(img_bgr)
-        detected = [
-            DetectedFace(
-                bbox=np.asarray(face.bbox, dtype=np.float32),
-                det_score=float(face.det_score),
-                embedding=np.asarray(face.normed_embedding, dtype=np.float32),
+        detected = []
+        for face in faces:
+            pitch, yaw, roll = self._extract_pose(face)
+            # Stream (det-lite) enginda recognition moduli yo'q → embedding None
+            raw_embedding = getattr(face, "normed_embedding", None)
+            detected.append(
+                DetectedFace(
+                    bbox=np.asarray(face.bbox, dtype=np.float32),
+                    det_score=float(face.det_score),
+                    embedding=(
+                        np.asarray(raw_embedding, dtype=np.float32)
+                        if raw_embedding is not None
+                        else None
+                    ),
+                    yaw=yaw,
+                    ear=eye_aspect_ratio_68(getattr(face, "landmark_3d_68", None)),
+                    pitch=pitch,
+                    roll=roll,
+                    landmarks=self._extract_landmarks(face),
+                )
             )
-            for face in faces
-        ]
         detected.sort(key=lambda f: f.area, reverse=True)
         return detected
+
+    @staticmethod
+    def _extract_pose(face: Any) -> tuple[float | None, float | None, float | None]:
+        """(pitch, yaw, roll) deg: prefer the 1k3d68 pose; kps yaw fallback."""
+        pose = getattr(face, "pose", None)
+        if pose is not None:
+            try:
+                arr = np.asarray(pose, dtype=np.float64).ravel()
+                if arr.size >= 3 and np.all(np.isfinite(arr[:3])):
+                    return float(arr[0]), float(arr[1]), float(arr[2])
+            except (TypeError, ValueError):
+                pass
+        return None, estimate_yaw_from_kps(getattr(face, "kps", None)), None
+
+    @staticmethod
+    def _extract_landmarks(face: Any) -> np.ndarray | None:
+        """106-point 2D landmarks (x, y float32) — mesh rendering uchun."""
+        lmk = getattr(face, "landmark_2d_106", None)
+        if lmk is None:
+            return None
+        try:
+            arr = np.asarray(lmk, dtype=np.float32)
+            if arr.ndim != 2 or arr.shape[0] < 5:
+                return None
+            return arr[:, :2]
+        except (TypeError, ValueError):
+            return None
 
     def best_face(self, img_bgr: np.ndarray) -> DetectedFace | None:
         """Largest detected face (used by verify/identify/liveness) or ``None``."""
@@ -216,6 +333,8 @@ class FaceEngine:
         if len(faces) > 1:
             return EnrollResult(ok=False, embedding=None, quality=0.0, error=ERROR_FACE_MULTIPLE)
         face = faces[0]
+        if face.embedding is None:  # det-lite engine bilan enroll chaqirilmasin
+            return EnrollResult(ok=False, embedding=None, quality=0.0, error=ERROR_FACE_NOT_FOUND)
         quality = compute_quality(
             det_score=face.det_score,
             face_width=face.width,

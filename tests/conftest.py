@@ -38,29 +38,48 @@ def make_embedding(dim: int = 512, seed: int = 1) -> list[float]:
 
 
 class FakeFaceEngine:
-    """Stands in for FaceEngine without loading any model."""
+    """Stands in for FaceEngine without loading any model.
+
+    ``yaws`` / ``ears`` (per-call sequences) let burst tests simulate head
+    turns and blinks: the i-th ``best_face`` call returns the i-th value.
+    """
 
     def __init__(
         self,
         embedding: Sequence[float] | None = None,
         enroll_result: EnrollResult | None = None,
         face_found: bool = True,
+        yaws: Sequence[float | None] | None = None,
+        ears: Sequence[float | None] | None = None,
     ) -> None:
         self._embedding = np.asarray(
             embedding if embedding is not None else make_embedding(), dtype=np.float32
         )
         self._enroll_result = enroll_result
         self._face_found = face_found
+        self._yaws = list(yaws) if yaws is not None else None
+        self._ears = list(ears) if ears is not None else None
+        self._calls = 0
         self.loaded = True
 
     def best_face(self, img: Any) -> DetectedFace | None:
+        call = self._calls
+        self._calls += 1
         if not self._face_found:
             return None
+        yaw = self._yaws[call % len(self._yaws)] if self._yaws else None
+        ear = self._ears[call % len(self._ears)] if self._ears else None
         return DetectedFace(
             bbox=np.array([10.0, 10.0, 120.0, 130.0], dtype=np.float32),
             det_score=0.95,
             embedding=self._embedding,
+            yaw=yaw,
+            ear=ear,
         )
+
+    def detect(self, img: Any) -> list[DetectedFace]:
+        face = self.best_face(img)
+        return [face] if face is not None else []
 
     def enroll(self, data: bytes, quality_threshold: float) -> EnrollResult:
         if self._enroll_result is not None:
@@ -104,7 +123,7 @@ class FakePool:
 
 
 def _reset_state() -> None:
-    for attr in ("face_engine", "liveness_engine", "db_pool"):
+    for attr in ("face_engine", "stream_engine", "liveness_engine", "db_pool"):
         if hasattr(app.state, attr):
             delattr(app.state, attr)
 

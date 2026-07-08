@@ -40,19 +40,25 @@ headerini talab qiladi, aks holda **401**.
 |---|---|
 | `POST /extract` | multipart `images` (1..5). Har rasm: `{ok, embedding: [512] \| null, quality, error}`. Xatolar: `FACE_NOT_FOUND`, `FACE_MULTIPLE`, `FACE_LOW_QUALITY` (quality < 0.35), `INVALID_IMAGE`. |
 | `POST /verify` | JSON `{image_b64, embeddings: [[512]...], match_threshold?, check_liveness}` → `{match, similarity, liveness_score, liveness_passed, error}`. Threshold default: `FACE_MATCH_THRESHOLD`. |
+| `POST /verify-live` | multipart `frames` (2..8 burst kadr) + `embeddings` (JSON) + `challenge` (`turn`\|`none`) → `{match, similarity, liveness_score, liveness_passed, challenge_passed, consistency, frames_total, frames_valid, error, reasons[]}`. Qatlamlar: yuz yetarli kadrda → kadrlararo izchillik → passiv anti-spoof ansambl → identity match → bosh burilishi (yaw ≥ `CHALLENGE_YAW_RANGE_DEG`) yoki blink. |
 | `POST /identify` | JSON `{image_b64, company_id (uuid), check_liveness}` → pgvector top-5 qidiruv → `{found, employee_id, similarity, liveness_score, liveness_passed, error}`. |
 | `POST /liveness` | JSON `{image_b64}` → `{liveness_score, passed, error}`. |
-| `GET /health` | `{status: "ok"\|"degraded", model_loaded, db: "ok"\|"error", liveness: "ok"\|"disabled"}` — api-key talab qilinmaydi. |
+| `GET /health` | `{status: "ok"\|"degraded", model_loaded, db: "ok"\|"error", liveness: "ok"\|"partial"\|"disabled"}` — api-key talab qilinmaydi. |
 
 Semantika bo'yicha muhim eslatmalar:
 
 - **extract** (enrollment) qat'iy: rasmda **aynan bitta** yuz bo'lishi shart.
 - **verify / identify / liveness** kiosk-rejimga mos: bir nechta yuz bo'lsa
   **eng katta** yuz olinadi (orqadagi odamlar xalaqit bermasligi uchun).
-- `match`/`found` va `liveness_passed` **mustaqil** qaytariladi — yakuniy qaror
-  (masalan, `LIVENESS_FAILED` xatosi) backend tomonida qabul qilinadi.
+- **XAVFSIZLIK GATING**: `/verify` va `/identify` da `match`/`found` liveness
+  o'tmagan yuz uchun HECH QACHON true bo'lmaydi (`error=LIVENESS_FAILED`);
+  `/identify` spoof holatida `employee_id` ham oshkor qilinmaydi.
+- `/verify-live` da identity match liveness'dan KEYIN tekshiriladi — spoof
+  urinish o'z rasmи "mos keldimi"ni bila olmaydi (oracle himoyasi).
 - Liveness inference'da runtime xato bo'lsa **fail-closed**: `score=0.0`
   (log: `liveness_inference_failed`).
+- Liveness endi **ansambl**: MiniFASNet `bin` + `print-replay` (ikkinchisi
+  ekran/qog'oz hujumlarga maxsus), aggregatsiya `min` (`LIVENESS_AGGREGATION`).
 
 ## Sifat bahosi (quality, 0..1)
 

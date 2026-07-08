@@ -20,6 +20,15 @@ DEFAULT_LIVENESS_MODEL_URL = (
     "saved_models/AntiSpoofing_bin_1.5_128.onnx"
 )
 
+#: Second ensemble member: the print/replay-specialised MiniFASNet conversion
+#: from the same repository (classes: [live, print-attack, replay-attack]).
+#: Catching screen-replay attacks is its training objective, which the binary
+#: model alone is weak at. Set LIVENESS_MODEL2_URL="" to disable the ensemble.
+DEFAULT_LIVENESS_MODEL2_URL = (
+    "https://github.com/hairymax/Face-AntiSpoofing/raw/main/"
+    "saved_models/AntiSpoofing_print-replay_1.5_128.onnx"
+)
+
 
 class Settings(BaseSettings):
     """Runtime settings (pydantic-settings, env-driven)."""
@@ -55,14 +64,39 @@ class Settings(BaseSettings):
     face_model_name: str = "buffalo_l"
     face_model_root: str = "~/.insightface"
     face_det_size: int = Field(default=640, ge=160)
+    #: Real-time /analyze uchun ALOHIDA yengil engine: kichikroq detektor
+    #: kirishi + faqat detection/landmark modullari (ArcFace har kadrda YO'Q).
+    #: 320 — yaqin masofadagi bitta yuz uchun yetarli va ~2x tezroq.
+    analyze_det_size: int = Field(default=320, ge=160)
+    analyze_lite_engine: bool = True
 
-    # --- Liveness (MiniFASNet ONNX) -------------------------------------------
+    # --- Liveness (MiniFASNet ONNX ansambl) -----------------------------------
     liveness_model_url: str = DEFAULT_LIVENESS_MODEL_URL
     liveness_model_path: str = "models/AntiSpoofing_bin_1.5_128.onnx"
     liveness_input_size: int = Field(default=128, ge=32)
     liveness_bbox_scale: float = Field(default=1.5, gt=0.0)
     liveness_live_index: int = Field(default=0, ge=0)
     liveness_download_timeout: float = Field(default=60.0, gt=0.0)
+    #: Ikkinchi (print/replay) model — bo'sh URL ansamblni o'chiradi.
+    liveness_model2_url: str = DEFAULT_LIVENESS_MODEL2_URL
+    liveness_model2_path: str = "models/AntiSpoofing_print-replay_1.5_128.onnx"
+    liveness_model2_live_index: int = Field(default=0, ge=0)
+    #: Ansambl skorini birlashtirish: "min" (qattiqroq, default) yoki "mean".
+    liveness_aggregation: str = "min"
+
+    # --- Burst (ko'p kadrli /verify-live) --------------------------------------
+    #: Kamida shuncha kadrda yuz topilishi shart, aks holda FACE_NOT_FOUND.
+    burst_min_valid_frames: int = Field(default=3, ge=1)
+    burst_max_frames: int = Field(default=8, ge=2)
+    #: Kadrlararo minimal juftlik o'xshashligi (bir odam ekanligi) chegarasi.
+    burst_consistency_threshold: float = Field(default=0.55, ge=0.0, le=1.0)
+    #: "turn" challenge: burst davomida yaw (bosh burilishi) diapazoni, gradus.
+    challenge_yaw_range_deg: float = Field(default=12.0, ge=0.0)
+    #: Blink (EAR) chegaralari — yopiq/ochiq ko'z; blink challenge'ga muqobil dalil.
+    #: Mobil klient blink PAYTIDA suratga oladi, lekin takePhoto kechikishi
+    #: tufayli ko'z to'liq yopiq bo'lmasligi mumkin — chegaralar shunga tolerantli.
+    blink_ear_close: float = Field(default=0.20, gt=0.0)
+    blink_ear_open: float = Field(default=0.26, gt=0.0)
 
 
 @lru_cache
