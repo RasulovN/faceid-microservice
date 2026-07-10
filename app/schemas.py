@@ -38,7 +38,8 @@ class VerifyRequest(BaseModel):
 class VerifyResponse(BaseModel):
     match: bool
     similarity: float = 0.0
-    liveness_score: float = 0.0
+    #: None — liveness tekshirilmagan (engine yo'q yoki o'chirilgan).
+    liveness_score: float | None = None
     liveness_passed: bool = False
     error: str | None = None
 
@@ -58,7 +59,8 @@ class IdentifyResponse(BaseModel):
     found: bool
     employee_id: str | None = None
     similarity: float = 0.0
-    liveness_score: float = 0.0
+    #: None — liveness tekshirilmagan (engine yo'q yoki o'chirilgan).
+    liveness_score: float | None = None
     liveness_passed: bool = False
     error: str | None = None
 
@@ -136,7 +138,8 @@ class LivenessRequest(BaseModel):
 
 
 class LivenessResponse(BaseModel):
-    liveness_score: float = 0.0
+    #: None — liveness tekshirilmagan (engine yo'q yoki o'chirilgan).
+    liveness_score: float | None = None
     passed: bool = False
     error: str | None = None
 

@@ -202,7 +202,9 @@ class TestVerify:
             headers=auth_headers,
         )
         body = response.json()
-        assert body["liveness_score"] == 1.0
+        # Tekshirilmagan liveness endi 1.0 EMAS, None — "skor yo'q" ma'nosida
+        # (backend kiosk yo'lida None fail-closed, ya'ni rad etiladi).
+        assert body["liveness_score"] is None
         assert body["liveness_passed"] is True
 
     def test_custom_threshold_overrides_default(self, client, auth_headers, image_b64) -> None:

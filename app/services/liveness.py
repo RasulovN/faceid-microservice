@@ -149,7 +149,15 @@ class LivenessEngine:
                 if self.use_gpu
                 else ["CPUExecutionProvider"]
             )
-            session = ort.InferenceSession(self.model_path, providers=providers)
+            # 128x128 kirish uchun ko'p thread foyda bermaydi; default (barcha
+            # yadrolar) esa InsightFace bilan bir jarayonda CPU talashib,
+            # parallel burst tahlilini sekinlashtiradi — 2 ta yetarli.
+            options = ort.SessionOptions()
+            options.intra_op_num_threads = 2
+            options.inter_op_num_threads = 1
+            session = ort.InferenceSession(
+                self.model_path, sess_options=options, providers=providers
+            )
             self._input_name = session.get_inputs()[0].name
             self._session = session
             logger.info("liveness_model_loaded", path=self.model_path, providers=providers)

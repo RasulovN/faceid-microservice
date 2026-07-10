@@ -13,6 +13,7 @@ Endpoints (all except ``GET /health`` require the ``X-Internal-Api-Key`` header)
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from contextlib import asynccontextmanager
@@ -230,10 +231,16 @@ async def _liveness_check(
     face: DetectedFace,
     enabled: bool,
     settings: Settings,
-) -> tuple[float, bool]:
-    """Compute (liveness_score, liveness_passed) for a detected face."""
+) -> tuple[float | None, bool]:
+    """Compute (liveness_score, liveness_passed) for a detected face.
+
+    Engine mavjud bo'lmasa yoki tekshiruv o'chirilgan bo'lsa score=None
+    qaytadi — "tekshirilmadi" degani. Ilgari 1.0 qaytarilardi va bu haqiqiy
+    100% skor bilan farqlanmasdi (rasm/ekran jimgina o'tib ketardi);
+    backend endi None ni fail-closed (rad) deb talqin qiladi.
+    """
     if not enabled or engine is None or not engine.available:
-        return 1.0, True
+        return None, True
     score = await run_in_threadpool(engine.score, img, face.bbox)
     return round(score, 4), score >= settings.liveness_threshold
 
@@ -540,12 +547,19 @@ async def verify_live(
     challenge_mode = challenge if challenge in (CHALLENGE_TURN, CHALLENGE_NONE) else CHALLENGE_TURN
 
     liveness_engine = _liveness_engine(request)
-    observations: list[FrameObservation] = []
-    for upload in frames:
-        data = await upload.read()
-        observations.append(
-            await run_in_threadpool(_analyze_frame, engine, liveness_engine, data, rotation)
+    # Kadrlar PARALLEL tahlil qilinadi (onnxruntime sessiyalari thread-safe):
+    # ketma-ket rejimda umumiy vaqt = kadrlar soni x kadr vaqti edi; endi
+    # dekodlash/preprocessing bir-birini kutmaydi va umumiy vaqt ~eng sekin
+    # kadr darajasiga tushadi. Bu mobil check-in javobining asosiy qismi.
+    frame_bytes = [await upload.read() for upload in frames]
+    observations: list[FrameObservation] = list(
+        await asyncio.gather(
+            *(
+                run_in_threadpool(_analyze_frame, engine, liveness_engine, data, rotation)
+                for data in frame_bytes
+            )
         )
+    )
 
     thresholds = BurstThresholds(
         min_valid_frames=min(settings.burst_min_valid_frames, len(frames)),
