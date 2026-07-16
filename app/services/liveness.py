@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
 import urllib.request
 from typing import Any
 
@@ -120,14 +121,24 @@ class LivenessEngine:
         if directory:
             os.makedirs(directory, exist_ok=True)
         logger.info("liveness_model_download_start", url=self.model_url, path=self.model_path)
-        tmp_path = self.model_path + ".part"
-        request = urllib.request.Request(
-            self.model_url, headers={"User-Agent": "faceid-face-service/1.0"}
-        )
-        with urllib.request.urlopen(request, timeout=self.download_timeout) as response:
-            with open(tmp_path, "wb") as output:
-                shutil.copyfileobj(response, output)
-        os.replace(tmp_path, self.model_path)
+        # Jarayonga XOS vaqtinchalik fayl: ko'p worker (uvicorn --workers>1) bir
+        # vaqtda yuklab olsa, sobit "*.part" ustma-ust yozilib ONNX buzilardi
+        # (keyin os.replace buzuq faylni qo'yib, engine jimgina disabled bo'lardi).
+        # mkstemp har jarayonga alohida fayl beradi; os.replace atomik.
+        fd, tmp_path = tempfile.mkstemp(dir=directory or ".", suffix=".part")
+        try:
+            request = urllib.request.Request(
+                self.model_url, headers={"User-Agent": "faceid-face-service/1.0"}
+            )
+            with urllib.request.urlopen(request, timeout=self.download_timeout) as response:
+                with os.fdopen(fd, "wb") as output:
+                    shutil.copyfileobj(response, output)
+            os.replace(tmp_path, self.model_path)
+        except BaseException:
+            # Yarim yuklangan vaqtinchalik faylni tozalaymiz
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise
         logger.info(
             "liveness_model_download_done",
             path=self.model_path,

@@ -238,9 +238,18 @@ async def _liveness_check(
     qaytadi — "tekshirilmadi" degani. Ilgari 1.0 qaytarilardi va bu haqiqiy
     100% skor bilan farqlanmasdi (rasm/ekran jimgina o'tib ketardi);
     backend endi None ni fail-closed (rad) deb talqin qiladi.
+
+    LIVENESS_REQUIRED=true bo'lsa: tekshiruv so'ralgan (enabled) lekin ansambl
+    mavjud emas — bu yerda ham fail-closed (None, False) qaytariladi, shunda
+    /verify va /identify match/found=false bo'ladi (modellar tushmay qolganda
+    spoof ochiq o'tib ketmaydi).
     """
-    if not enabled or engine is None or not engine.available:
+    if not enabled:
         return None, True
+    if engine is None or not engine.available:
+        # required=false — hujjatlashtirilgan "disabled" fallback (o'tkazadi);
+        # required=true — modellar yo'q ekan, rad (fail-closed).
+        return None, not settings.liveness_required
     score = await run_in_threadpool(engine.score, img, face.bbox)
     return round(score, 4), score >= settings.liveness_threshold
 
@@ -547,6 +556,17 @@ async def verify_live(
     challenge_mode = challenge if challenge in (CHALLENGE_TURN, CHALLENGE_NONE) else CHALLENGE_TURN
 
     liveness_engine = _liveness_engine(request)
+    # LIVENESS_REQUIRED=true va ansambl mavjud emas (modellar tushmagan) —
+    # burst kadrlari 1.0 skor bilan jimgina o'tib ketmasligi uchun fail-closed.
+    if settings.liveness_required and (liveness_engine is None or not liveness_engine.available):
+        logger.warning("verify_live_liveness_unavailable_failclosed")
+        return VerifyLiveResponse(
+            match=False,
+            liveness_passed=False,
+            frames_total=len(frames),
+            error=ERROR_LIVENESS_FAILED,
+            reasons=["liveness_unavailable"],
+        )
     # Kadrlar PARALLEL tahlil qilinadi (onnxruntime sessiyalari thread-safe):
     # ketma-ket rejimda umumiy vaqt = kadrlar soni x kadr vaqti edi; endi
     # dekodlash/preprocessing bir-birini kutmaydi va umumiy vaqt ~eng sekin

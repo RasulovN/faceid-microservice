@@ -188,6 +188,30 @@ class TestVerify:
         assert body["error"] == "LIVENESS_FAILED"
         assert body["similarity"] > 0.99  # o'xshashlik hisobot uchun saqlanadi
 
+    def test_liveness_required_failcloses_when_engine_unavailable(
+        self, client, auth_headers, image_b64
+    ) -> None:
+        """LIVENESS_REQUIRED=true + ansambl yo'q → embedding mos bo'lsa ham
+        match=false (modellar tushmay qolganda spoof ochiq o'tib ketmaydi)."""
+        from app.config import get_settings
+
+        embedding = make_embedding(seed=42)
+        app.state.face_engine = FakeFaceEngine(embedding=embedding)
+        app.state.liveness_engine = FakeLivenessEngine(available=False)
+        get_settings().liveness_required = True
+        try:
+            response = client.post(
+                "/verify",
+                json={"image_b64": image_b64, "embeddings": [embedding]},
+                headers=auth_headers,
+            )
+            body = response.json()
+            assert body["liveness_passed"] is False
+            assert body["match"] is False
+            assert body["error"] == "LIVENESS_FAILED"
+        finally:
+            get_settings().liveness_required = False
+
     def test_check_liveness_false_skips_check(self, client, auth_headers, image_b64) -> None:
         embedding = make_embedding(seed=42)
         app.state.face_engine = FakeFaceEngine(embedding=embedding)
